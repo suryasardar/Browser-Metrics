@@ -9,7 +9,7 @@ def encode_image_to_base64(image_path: str) -> str:
         return base64.b64encode(img_file.read()).decode("utf-8")
 
 async def extract_filters(screenshot_path: str) -> List[str]:
-    """Uses Gemini Flash API to dynamically find filter names on the dashboard."""
+    """Uses Gemini Flash API to dynamically find filter names on the dashboard.."""
     base64_image = encode_image_to_base64(screenshot_path)
     
     prompt = """
