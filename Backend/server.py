@@ -1,5 +1,6 @@
 import sys
 import json
+import logging
 import asyncio
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -7,10 +8,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from automation.validator import DashboardValidator
 
-# Initialize FastAPI
+# Initialize System Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("server")
+
 app = FastAPI(title="PowerBI QA Agent API")
 
-# Add CORS just in case your frontend needs it for standard API calls later
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -23,32 +29,37 @@ class ValidateRequest(BaseModel):
     source_url: str
     target_url: str
 
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
 @app.websocket("/ws/validate")
 async def websocket_validate(websocket: WebSocket):
-    """Real-time WebSocket endpoint for the React Frontend."""
+    """Real-time WebSocket endpoint for React UI logs and results."""
     await websocket.accept()
+    logger.info("WebSocket connection established with client.")
     
-    # Wait for the frontend to send the URLs
-    data = await websocket.receive_text()
-    request = json.loads(data)
-    
-    async def send_log(message: dict):
-        await websocket.send_json(message)
-
     try:
+        data = await websocket.receive_text()
+        request = json.loads(data)
+        logger.info(f"Received validation request for Source: {request.get('source_url')[:30]}...")
+        
+        async def send_log(message: dict):
+            await websocket.send_json(message)
+
         validator = DashboardValidator(send_log=send_log)
-        # Using the sequential execution logic we set up earlier
         await validator.run_comparison_suite(
             source_url=request.get("source_url"),
             target_url=request.get("target_url")
         )
     except WebSocketDisconnect:
-        print("Client disconnected from WebSocket.")
+        logger.info("Client disconnected from WebSocket.")
     except Exception as e:
+        logger.error(f"Unhandled WebSocket error: {e}")
         await websocket.send_json({"event": "ERROR", "message": str(e)})
 
 async def run_server():
-    """Configures and runs the Uvicorn server programmatically."""
+    """Configures and launches Uvicorn server instance."""
     config = uvicorn.Config(
         "server:app",
         host="127.0.0.1",
@@ -59,12 +70,12 @@ async def run_server():
     await server.serve()
 
 if __name__ == "__main__":
-    # --- YOUR FRIEND'S BRILLIANT PYTHON 3.14 FIX ---
+    logger.info("Initializing Backend Server...")
     try:
         if sys.platform == "win32":
-            # Forces the correct Event Loop for Playwright on Windows without deprecation warnings
+            # Force ProactorEventLoop for Python 3.14 Windows compatibility
             asyncio.run(run_server(), loop_factory=asyncio.ProactorEventLoop)
         else:
             asyncio.run(run_server())
     except Exception as e:
-        print(f"Failed to start server: {e}")
+        logger.critical(f"Failed to start server: {e}")

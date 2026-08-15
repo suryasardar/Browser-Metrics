@@ -12,7 +12,7 @@ PAGE_TIMEOUT = int(os.getenv("PAGE_TIMEOUT", 60000))
 RENDER_WAIT = int(os.getenv("RENDER_WAIT", 2000))
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-VISION_MODEL = os.getenv("VISION_MODEL", "gemini-1.5-flash")
+VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3.5-flash")
 
 # Windows Edge Profile specific settings
 EDGE_USER_DATA_DIR = os.getenv("EDGE_USER_DATA_DIR", "")
