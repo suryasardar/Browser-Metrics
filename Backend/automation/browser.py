@@ -65,39 +65,77 @@ async def launch_edge_profile():
     logger.critical("Failed to launch Microsoft Edge with any detected profile subfolders.")
     raise RuntimeError("Could not launch Microsoft Edge with any available profile.")
 
-async def wait_for_dashboard(page: Page):
-    """Waits for Power BI visual elements to attach to the DOM and stabilize."""
+async def wait_for_dashboard(page: Page, extra_delay: float = 3.0):
+    """
+    Waits for visual containers to attach, waits for Power BI loading spinners 
+    to disappear, and adds a stabilization buffer.
+    """
     logger.info("Waiting for Power BI visual containers to attach to DOM...")
+    
+    # 1. Wait for containers to attach
     await page.wait_for_selector(
         "visual-container, .visualContainer", 
         state="attached", 
         timeout=PAGE_TIMEOUT
     )
-    logger.info("Visual containers attached. Stabilizing visual calculations...")
-    await page.wait_for_timeout(RENDER_WAIT)
+    
+    # 2. Wait for loading spinners/overlays to detach (disappear)
+    try:
+        logger.info("Waiting for Power BI data loading spinners to clear...")
+        await page.wait_for_selector(
+            ".loading-spinner, .visual-loading, .gxp-visual-container-spinner", 
+            state="detached", 
+            timeout=10000
+        )
+    except Exception:
+        # Spinners cleared or were not present
+        pass
+
+    # 3. Dedicated stabilization pause for visual data rendering
+    logger.info(f"Stabilizing visual calculations ({extra_delay}s buffer)...")
+    await page.wait_for_timeout(int(extra_delay * 1000))
 
 async def extract_navigation_pages(page: Page) -> list[str]:
-    """Extracts report page tab names from the left or bottom navigation panel."""
+    """Extracts page tab names safely using .itemName and text_content()."""
     pages = []
     try:
-        tabs = page.locator(".page-navigation [role='tab'], [role='treeitem']")
+        # Primary: Target .itemName directly inside the navigation panel
+        tabs = page.locator(".itemName, .page-navigation .itemName")
         count = await tabs.count()
-        logger.info(f"Detected {count} page navigation element(s) in DOM.")
+        
+        # Fallback: Use standard tab roles if .itemName is not present
+        if count == 0:
+            tabs = page.locator(".page-navigation [role='tab'], .page-navigation [role='treeitem']")
+            count = await tabs.count()
+
         for i in range(count):
-            name = await tabs.nth(i).inner_text()
-            if name.strip():
-                pages.append(name.strip())
+            try:
+                name = await tabs.nth(i).text_content()
+                clean_name = name.strip() if name else ""
+                if clean_name and clean_name not in pages:
+                    pages.append(clean_name)
+            except Exception:
+                continue
+                
         logger.info(f"Extracted page names: {pages}")
     except Exception as e:
         logger.error(f"Failed to extract navigation pages: {e}")
     return pages
 
 async def switch_to_page(page: Page, page_name: str):
-    """Navigates to a specific page tab in the report."""
+    """Switches to a specific report page tab using .itemName."""
     try:
         logger.info(f"Switching report tab to: '{page_name}'")
-        tab = page.locator(f".page-navigation [role='tab']:has-text('{page_name}'), [role='treeitem']:has-text('{page_name}')").first
+        
+        # Target .itemName directly matching the target page name
+        tab = page.locator(f".itemName:has-text('{page_name}')").first
+        
+        # Fallback to standard ARIA roles if .itemName is not found
+        if await tab.count() == 0:
+            tab = page.locator(f".page-navigation [role='tab']:has-text('{page_name}'), [role='treeitem']:has-text('{page_name}')").first
+
         await tab.click()
+        logger.info(f"✅ Successfully clicked tab: '{page_name}'. Waiting for dashboard stabilization...")
         await wait_for_dashboard(page)
     except Exception as e:
         logger.error(f"Failed to switch to page '{page_name}': {e}")
