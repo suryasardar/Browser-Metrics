@@ -17,3 +17,6 @@ VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3.5-flash")
 # Windows Edge Profile specific settings
 EDGE_USER_DATA_DIR = os.getenv("EDGE_USER_DATA_DIR", "")
 EDGE_PROFILE_NAME = os.getenv("EDGE_PROFILE_NAME", "Default")
+
+
+# changes
