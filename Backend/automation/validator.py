@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any, Callable, List
 from .browser import launch_edge_profile, wait_for_dashboard, extract_navigation_pages
 from .slicer import SlicerEngine
+from .network import NetworkMonitor
 from utils.config import PAGE_TIMEOUT, FILTER_TEST_COUNT
 
 logger = logging.getLogger("automation.validator")
@@ -69,6 +70,9 @@ class DashboardValidator:
 
         playwright_instance, context, page = await launch_edge_profile()
 
+        network = NetworkMonitor()
+        network.register(page)
+
         metrics = {
             "dashboard": name,
             "load_time_seconds": 0,
@@ -76,6 +80,7 @@ class DashboardValidator:
             "filters": [],
             "filter_tests": [],
             "avg_refresh_seconds": None,
+            "network": None,
         }
 
         try:
@@ -139,7 +144,21 @@ class DashboardValidator:
             else:
                 await self._emit("WARNING", f"[{name}] No filters detected on this dashboard.")
 
-            # 4. Send the full metrics packet for this dashboard to the UI
+            # 4. Attach network health so a CLICK_FAILED/NO_OPTIONS result can be
+            #    told apart from "the request itself failed" vs. "just slow"
+            net_summary = network.summary()
+            metrics["network"] = net_summary
+
+            if net_summary["failed_requests"] > 0 or net_summary["page_errors"] > 0:
+                details = network.failure_details()
+                await self._emit(
+                    "WARNING",
+                    f"⚠️ [{name}] {net_summary['failed_requests']} failed network request(s), "
+                    f"{net_summary['page_errors']} JS error(s) during this run.",
+                    payload={"network_failures": details},
+                )
+
+            # 5. Send the full metrics packet for this dashboard to the UI
             await self._emit(
                 "METRICS",
                 f"📊 [{name}] Metrics collected.",
