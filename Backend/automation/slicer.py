@@ -3,19 +3,70 @@ from playwright.async_api import Page
 
 logger = logging.getLogger("automation.slicer")
 
+POPUP_SELECTOR = ".slicer-dropdown-popup:visible, .slicer-dropdown-popup.focused"
+
+
 class SlicerEngine:
     def __init__(self, page: Page):
         self.page = page
 
     async def _close_any_open_popups(self):
-        """Ensures any currently open dropdown popup is closed before inspecting another slicer."""
+        """Ensures any currently open dropdown popup is actually closed (not just Escape-and-hope)."""
         try:
             popup = self.page.locator(".slicer-dropdown-popup:visible")
             if await popup.count() > 0:
                 await self.page.keyboard.press("Escape")
-                await self.page.wait_for_timeout(400)
+                try:
+                    await popup.first.wait_for(state="hidden", timeout=2000)
+                except Exception:
+                    pass
         except Exception:
             pass
+
+    async def _open_dropdown(self, filter_name: str):
+        """
+        Locates the slicer's visual container, clicks its dropdown trigger, and waits
+        for the popup AND at least one item row to actually render before returning it.
+        This replaces fixed sleeps, which is what was causing CLICK_FAILED / NO_OPTIONS
+        on slower-loading slicers (e.g. relative-date filters, or a slower data source).
+        Returns the popup locator, or None if it never opened/populated.
+        """
+        slicer_visual = self.page.locator(
+            f"visual-container:has(.slicer-header-text:text-is('{filter_name}'))"
+        ).first
+        if await slicer_visual.count() == 0:
+            slicer_visual = self.page.locator(
+                f"visual-container:has(.slicer-header-text:has-text('{filter_name}'))"
+            ).first
+
+        if await slicer_visual.count() == 0:
+            logger.warning(f"Slicer visual '{filter_name}' not found in DOM.")
+            return None
+
+        dropdown_btn = slicer_visual.locator(
+            ".slicer-dropdown-menu, .slicer-rest-item, [role='combobox']"
+        ).first
+        if await dropdown_btn.count() == 0:
+            logger.warning(f"No dropdown trigger found for '{filter_name}'.")
+            return None
+
+        await dropdown_btn.click(force=True)
+
+        popup = self.page.locator(POPUP_SELECTOR).first
+        try:
+            await popup.wait_for(state="visible", timeout=4000)
+        except Exception:
+            logger.warning(f"Popup never became visible for '{filter_name}'.")
+            return None
+
+        # Wait for the item list itself to populate (this is the part that was racing).
+        try:
+            await popup.locator(".slicerItemContainer").first.wait_for(state="visible", timeout=5000)
+        except Exception:
+            # Popup opened but items never rendered in time — caller decides what to do.
+            logger.warning(f"Popup opened for '{filter_name}' but no items rendered within timeout.")
+
+        return popup
 
     async def count_slicers(self) -> int:
         """Counts filter header titles in DOM."""
@@ -43,30 +94,16 @@ class SlicerEngine:
             return filter_names
 
     async def get_filter_options(self, filter_name: str) -> list[str]:
-        """Ensures clean state, opens specific dropdown using exact title matching, and reads items."""
+        """Ensures clean state, opens specific dropdown, waits for it to populate, and reads items."""
         logger.info(f"Reading options for filter: '{filter_name}'")
         options = []
         try:
-            # 1. Close any previously open dropdown to prevent reading old options
             await self._close_any_open_popups()
 
-            # 2. Locate exact visual container matching the filter title strictly (:text-is)
-            slicer_visual = self.page.locator(f"visual-container:has(.slicer-header-text:text-is('{filter_name}'))").first
-            if await slicer_visual.count() == 0:
-                slicer_visual = self.page.locator(f"visual-container:has(.slicer-header-text:has-text('{filter_name}'))").first
-
-            if await slicer_visual.count() == 0:
-                logger.warning(f"Slicer visual '{filter_name}' not found in DOM.")
+            popup = await self._open_dropdown(filter_name)
+            if popup is None:
                 return options
 
-            # 3. Click dropdown trigger button for THIS specific slicer
-            dropdown_btn = slicer_visual.locator(".slicer-dropdown-menu, .slicer-rest-item, [role='combobox']").first
-            if await dropdown_btn.count() > 0:
-                await dropdown_btn.click(force=True)
-                await self.page.wait_for_timeout(600)
-
-            # 4. Read items from the newly opened popup overlay
-            popup = self.page.locator(".slicer-dropdown-popup:visible, .slicer-dropdown-popup.focused").first
             items = popup.locator(".slicerItemContainer .slicerText")
             count = await items.count()
 
@@ -76,9 +113,7 @@ class SlicerEngine:
                 if clean and clean not in options:
                     options.append(clean)
 
-            # 5. Close popup menu cleanly
-            await self.page.keyboard.press("Escape")
-            await self.page.wait_for_timeout(400)
+            await self._close_any_open_popups()
 
             logger.info(f"✅ Discovered options for '{filter_name}': {options}")
             return options
@@ -88,35 +123,45 @@ class SlicerEngine:
             await self._close_any_open_popups()
             return options
 
-    async def apply_filter(self, filter_name: str, option_value: str):
-        """Auto-selects option in active popup after ensuring clean popup state."""
+    async def apply_filter(self, filter_name: str, option_value: str) -> bool:
+        """
+        Selects option in the dropdown popup. Waits for the popup/items to actually
+        render (not a fixed sleep), and retries opening the dropdown once if the
+        target row isn't found the first time — the popup can genuinely still be
+        populating (slow slicer, slow data source) even after it's visible.
+        Does not sleep for DAX recalculation here — the caller times that separately.
+        Returns True if the option was found and clicked.
+        """
         logger.info(f"Applying filter: [{filter_name} = '{option_value}']")
-        try:
-            # 1. Close any leftover popups first
-            await self._close_any_open_popups()
 
-            # 2. Locate visual container using exact text match
-            slicer_visual = self.page.locator(f"visual-container:has(.slicer-header-text:text-is('{filter_name}'))").first
-            if await slicer_visual.count() == 0:
-                slicer_visual = self.page.locator(f"visual-container:has(.slicer-header-text:has-text('{filter_name}'))").first
+        for attempt in range(2):
+            try:
+                await self._close_any_open_popups()
 
-            # 3. Click dropdown trigger button
-            dropdown_btn = slicer_visual.locator(".slicer-dropdown-menu, .slicer-rest-item, [role='combobox']").first
-            if await dropdown_btn.count() > 0:
-                await dropdown_btn.click(force=True)
-                await self.page.wait_for_timeout(600)
+                popup = await self._open_dropdown(filter_name)
+                if popup is None:
+                    if attempt == 0:
+                        continue  # retry once
+                    return False
 
-            # 4. Target freshly opened popup
-            popup = self.page.locator(".slicer-dropdown-popup:visible, .slicer-dropdown-popup.focused").first
+                target_row = popup.locator(
+                    f".slicerItemContainer:has(.slicerText:text-is('{option_value}'))"
+                ).first
+                if await target_row.count() == 0:
+                    target_row = popup.locator(
+                        f".slicerItemContainer:has(.slicerText:has-text('{option_value}'))"
+                    ).first
 
-            # 5. Find matching item row
-            target_row = popup.locator(f".slicerItemContainer:has(.slicerText:text-is('{option_value}'))").first
-            if await target_row.count() == 0:
-                target_row = popup.locator(f".slicerItemContainer:has(.slicerText:has-text('{option_value}'))").first
+                if await target_row.count() == 0:
+                    logger.warning(
+                        f"Attempt {attempt + 1}: option '{option_value}' not found in '{filter_name}' popup."
+                    )
+                    await self._close_any_open_popups()
+                    if attempt == 0:
+                        continue  # retry once — popup may still have been populating
+                    return False
 
-            if await target_row.count() > 0:
                 await target_row.scroll_into_view_if_needed()
-                await self.page.wait_for_timeout(200)
 
                 text_el = target_row.locator(".slicerText").first
                 if await text_el.count() > 0:
@@ -125,44 +170,16 @@ class SlicerEngine:
                     await target_row.click(force=True)
 
                 logger.info(f"✅ Successfully selected option '{option_value}' under '{filter_name}'.")
-            else:
-                logger.warning(f"Option '{option_value}' not found in '{filter_name}' dropdown popup.")
 
-            # 6. Close popup menu and pause for DAX recalculations
-            await self.page.keyboard.press("Escape")
-            await self.page.wait_for_timeout(3000)
-
-        except Exception as e:
-            logger.error(f"Error applying filter '{filter_name}' = '{option_value}': {e}")
-            await self._close_any_open_popups()
-
-    async def extract_kpi_cards(self, max_retries: int = 2) -> dict:
-        """Extracts KPI card values, retrying automatically if visuals return empty or N/A."""
-        logger.info("Extracting KPI metrics from report visuals...")
-        
-        for attempt in range(max_retries + 1):
-            kpis = {}
-            try:
-                visuals = self.page.locator("visual-container")
-                count = await visuals.count()
-                
-                for i in range(count):
-                    text = await visuals.nth(i).inner_text()
-                    lines = [line.strip() for line in text.split("\n") if line.strip()]
-                    if len(lines) >= 2:
-                        label, value = lines[0], lines[1]
-                        if len(label) < 40 and len(value) < 25 and value.lower() != "n/a":
-                            kpis[label] = value
-
-                if len(kpis) > 0:
-                    logger.info(f"✅ Extracted {len(kpis)} KPI metric(s): {kpis}")
-                    return kpis
-                
-                if attempt < max_retries:
-                    logger.warning(f"Visuals returned empty/N/A on attempt {attempt + 1}. Bumping wait time by 3.0s...")
-                    await self.page.wait_for_timeout(3000)
+                await self.page.keyboard.press("Escape")
+                await self.page.wait_for_timeout(300)
+                return True
 
             except Exception as e:
-                logger.error(f"Error extracting KPI cards (attempt {attempt + 1}): {e}")
-                
-        return kpis
+                logger.error(f"Error applying filter '{filter_name}' = '{option_value}': {e}")
+                await self._close_any_open_popups()
+                if attempt == 0:
+                    continue
+                return False
+
+        return False

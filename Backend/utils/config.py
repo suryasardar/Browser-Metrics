@@ -11,6 +11,10 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 PAGE_TIMEOUT = int(os.getenv("PAGE_TIMEOUT", 60000))
 RENDER_WAIT = int(os.getenv("RENDER_WAIT", 2000))
 
+# How many filters to randomly sample and test per dashboard per run.
+# Keep this small (2-3) — each test involves a real click + DAX recalculation wait.
+FILTER_TEST_COUNT = int(os.getenv("FILTER_TEST_COUNT", 3))
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 VISION_MODEL = os.getenv("VISION_MODEL", "gemini-3.5-flash")
 
